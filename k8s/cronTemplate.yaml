@@ -1,0 +1,94 @@
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: cron-{{scriptNameLowerCase}}
+spec:
+  schedule: '{{schedule}}'
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: cron-{{scriptNameLowerCase}}
+              image: {{ .Values.image }}
+              command: ['/bin/sh', '-c']
+              volumeMounts:
+                - name: vipps-settlements-config
+                  mountPath: /secrets/google/credentials.json
+                  readOnly: true
+                  subPath: credentials.json
+                - mountPath: /tmp/pod
+                  name: tmp-pod
+              args:
+                - |
+                  trap "touch /tmp/pod/main-terminated" EXIT
+                  node ./src/crons {{scriptName}}
+              env:
+                - name: CONTAINER_NAME
+                  value: cron-{{scriptNameLowerCase}}
+                - name: NODE_ENV
+                  value: 'production'
+                - name: CONFIG_DB_HOST
+                  value: "127.0.0.1"
+                - name: CONFIG_DB_USER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-settlements-config
+                      key: dbUser
+                - name: CONFIG_DB_PASSWORD
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-settlements-config
+                      key: dbPassword
+                - name: SENTRY_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-settlements-config
+                      key: sentryUrl
+                - name: VIPPS_SSH_PRIVATE_KEY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-config
+                      key: vippsSSHPrivateKey
+                - name: VIPPS_MERCHANT_SERIAL_NUMBER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-config
+                      key: merchantSerialNumber
+                - name: VIPPS_ORG_NR
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vipps-config
+                      key: orgNr
+            - name: cloudsql-proxy
+              image: gcr.io/cloudsql-docker/gce-proxy:1.15
+              command: ['/bin/sh', '-c']
+              args:
+                - |
+                  /cloud_sql_proxy --dir=/cloudsql -instances=norfpv:europe-north1:norfpv-postgres=tcp:5432 -credential_file=/secrets/google/credentials.json &
+                  echo $!
+                  echo $! > /tmp/process.pid
+                  CHILD_PID=$!
+                  (while true; do if [[ -f "/tmp/pod/main-terminated" ]]; then kill -9 `cat /tmp/process.pid`; echo "Killed $CHILD_PID as the main container terminated."; fi; sleep 1; done) &
+                  wait `cat /tmp/process.pid`
+                  if [[ -f "/tmp/pod/main-terminated" ]]; then exit 0; echo "Job completed. Exiting..."; fi
+              securityContext:
+                runAsUser: 2
+                allowPrivilegeEscalation: false
+              volumeMounts:
+                - name: vipps-settlements-config
+                  mountPath: /secrets/google/credentials.json
+                  readOnly: true
+                  subPath: credentials.json
+                - mountPath: /tmp/pod
+                  name: tmp-pod
+                  readOnly: true
+          volumes:
+            - name: vipps-settlements-config
+              secret:
+                secretName: vipps-settlements-config
+            - name: tmp-pod
+              emptyDir: {}

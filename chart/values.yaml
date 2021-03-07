@@ -1,0 +1,4 @@
+replicaCount: 1
+name: "vipps-settlement"
+image: smth
+port: 3000

@@ -1,0 +1,110 @@
+version: 2.1
+
+jobs:
+    build:
+        docker:
+            - image: cimg/node:14.15
+        steps:
+            - checkout
+            - node/install-packages:
+                  pkg-manager: yarn
+            - run:
+                  name: Build kubernetes config for crons
+                  command: |
+                      node createCronsFromTemplate.js
+            - persist_to_workspace:
+                  root: .
+                  paths:
+                      - node_modules
+                      - chart
+
+    deploy:
+        docker:
+            - image: cimg/node:14.15
+        steps:
+            - checkout
+            - attach_workspace:
+                  at: .
+            - helm/install-helm-client:
+                  version: v3.0.2
+            - gcp-cli/install
+            - gcp-cli/initialize:
+                  gcloud-service-key: GCLOUD_SERVICE_KEY
+                  google-compute-zone: GCP_COMPUTE_ZONE
+                  google-project-id: GCP_PROJECT_ID
+            - run: wget https://dl.google.com/cloudsql/cloud_sql_proxy.linux.amd64 -O cloud_sql_proxy
+            - run: chmod +x cloud_sql_proxy
+            - run: echo $GCLOUD_SERVICE_KEY > creds.json
+            - run:
+                  command: |
+                      ./cloud_sql_proxy -instances=$CLOUD_SQL_INSTANCE=tcp:5432 -credential_file=creds.json &
+                      export CONFIG_DB_HOST=127.0.0.1
+                      export CONFIG_DB_USER=$GCP_POSTGRES_USERNAME
+                      export CONFIG_DB_PASSWORD=$GCP_POSTGRES_PASSWORD
+                      yarn migrate
+            - run: gcloud --quiet container clusters get-credentials ${GCP_CLUSTER_NAME}
+            - run:
+                  name: Deploy helm chart
+                  command: |
+                      helm upgrade --install vipps-settlements \
+                        --set image="dronehandelen/vipps-settlements:${CIRCLE_SHA1}" \
+                        --namespace production \
+                        ./chart
+
+    deploy_to_sentry:
+        docker:
+            - image: getsentry/sentry-cli
+        environment:
+            - SENTRY_PROJECT_NAME: 'vipps-settlements'
+        steps:
+            - checkout
+            - attach_workspace:
+                  at: .
+            - run:
+                  name: Setup sentry
+                  command: |
+                      sentry-cli --auth-token $SENTRY_AUTH_TOKEN releases new -p $SENTRY_PROJECT_NAME $CIRCLE_SHA1
+                      sentry-cli --auth-token $SENTRY_AUTH_TOKEN releases set-commits --auto $CIRCLE_SHA1
+                      sentry-cli --auth-token $SENTRY_AUTH_TOKEN releases -p $SENTRY_PROJECT_NAME finalize $CIRCLE_SHA1
+                      sentry-cli --auth-token $SENTRY_AUTH_TOKEN releases deploys $CIRCLE_SHA1 new -e production
+
+orbs:
+    helm: circleci/helm@0.2.3
+    gcp-cli: circleci/gcp-cli@1.8.3
+    node: circleci/node@4.1.0
+    docker: circleci/docker@1.5.0
+
+workflows:
+    build_deploy:
+        jobs:
+            - build
+            - docker/publish:
+                  attach-at: ./
+                  cache_from: dronehandelen/vipps-settlements:latest
+                  image: dronehandelen/vipps-settlements
+                  tag: ${CIRCLE_SHA1},latest
+                  docker-username: DOCKER_HUB_USERNAME
+                  docker-password: DOCKER_HUB_TOKEN
+                  context:
+                      - hub
+                  requires:
+                      - build
+                  filters:
+                      branches:
+                          only: master
+            - deploy:
+                  requires:
+                      - docker/publish
+                  context:
+                      - GCP
+                  filters:
+                      branches:
+                          only: master
+            - deploy_to_sentry:
+                  requires:
+                      - deploy
+                  context:
+                      - sentry
+                  filters:
+                      branches:
+                          only: master
