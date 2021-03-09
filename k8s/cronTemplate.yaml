@@ -88,7 +88,7 @@ spec:
                   readOnly: true
           volumes:
             - name: vipps-settlements-config
-              secret:
-                secretName: vipps-settlements-config
+              configMap:
+                name: vipps-settlements-config
             - name: tmp-pod
               emptyDir: {}
